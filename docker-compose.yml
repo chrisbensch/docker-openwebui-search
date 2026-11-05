@@ -1,0 +1,232 @@
+---
+services:
+  firecrawl-api:
+    networks:
+      - backend
+    image: ${FIRECRAWL_IMAGE:-ghcr.io/firecrawl/firecrawl:latest}
+    restart: unless-stopped
+    ports:
+      - "${FIRECRAWL_BIND_HOST:-127.0.0.1}:${FIRECRAWL_HOST_PORT:-3002}:3002"
+    depends_on:
+      firecrawl-redis:
+        condition: service_healthy
+      firecrawl-playwright:
+        condition: service_started
+      firecrawl-rabbitmq:
+        condition: service_healthy
+      firecrawl-nuq-postgres:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3002
+      USE_DB_AUTHENTICATION: ${FIRECRAWL_USE_DB_AUTHENTICATION:-false}
+      REDIS_URL: redis://firecrawl-redis:6379
+      REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
+      PLAYWRIGHT_MICROSERVICE_URL: http://firecrawl-playwright:3000/scrape
+      POSTGRES_USER: ${FIRECRAWL_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${FIRECRAWL_POSTGRES_PASSWORD:?Run ./setup.sh to generate Firecrawl credentials}
+      POSTGRES_DB: ${FIRECRAWL_POSTGRES_DB:-postgres}
+      POSTGRES_HOST: firecrawl-nuq-postgres
+      POSTGRES_PORT: 5432
+      NUQ_RABBITMQ_URL: amqp://firecrawl-rabbitmq:5672
+      BULL_AUTH_KEY: ${FIRECRAWL_BULL_AUTH_KEY:?Run ./setup.sh to generate Firecrawl credentials}
+      SEARXNG_ENDPOINT: http://searxng:80
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  firecrawl-playwright:
+    networks:
+      - backend
+    image: ${FIRECRAWL_PLAYWRIGHT_IMAGE:-ghcr.io/firecrawl/playwright-service:latest}
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  firecrawl-redis:
+    networks:
+      - backend
+    image: ${FIRECRAWL_REDIS_IMAGE:-redis:alpine}
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - firecrawl-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  firecrawl-rabbitmq:
+    networks:
+      - backend
+    image: ${FIRECRAWL_RABBITMQ_IMAGE:-rabbitmq:3-management}
+    restart: unless-stopped
+    volumes:
+      - firecrawl-rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  firecrawl-nuq-postgres:
+    networks:
+      - backend
+    # Firecrawl apps/nuq-postgres at 80da82307c36913e4abc5677d25d975da3e50385.
+    build:
+      context: ./config/firecrawl/nuq-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${FIRECRAWL_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${FIRECRAWL_POSTGRES_PASSWORD:?Run ./setup.sh to generate Firecrawl credentials}
+      POSTGRES_DB: ${FIRECRAWL_POSTGRES_DB:-postgres}
+    volumes:
+      - firecrawl-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  searxng-core:
+    networks:
+      - backend
+    image: ${SEARXNG_IMAGE:-searxng/searxng:latest}
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?Run ./setup.sh to generate the SearXNG secret}
+    volumes:
+      - type: bind
+        source: ./config/web-search/searxng-settings.yml
+        target: /etc/searxng/settings.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./config/web-search/searxng-limiter.toml
+        target: /etc/searxng/limiter.toml
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  searxng:
+    networks:
+      - backend
+    image: ${SEARXNG_NGINX_IMAGE:-nginx:alpine}
+    restart: unless-stopped
+    ports:
+      - "${SEARXNG_BIND_HOST:-127.0.0.1}:${SEARXNG_HOST_PORT:-8889}:80"
+    volumes:
+      - type: bind
+        source: ./config/web-search/nginx.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      searxng-core:
+        condition: service_started
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  camofox:
+    networks:
+      - backend
+    image: ${CAMOFOX_IMAGE:-ghcr.io/jo-inc/camofox-browser:latest}
+    restart: unless-stopped
+    ports:
+      - "${CAMOFOX_BIND_HOST:-127.0.0.1}:${CAMOFOX_HOST_PORT:-9377}:9377"
+    environment:
+      CAMOFOX_PORT: 9377
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    restart: unless-stopped
+    user: "1000:1000"
+    depends_on:
+      - firecrawl-api
+    volumes:
+      - ./data/open-webui:/app/backend/data:rw
+    networks:
+      - backend
+    ports:
+      - "8080:8080"
+    environment:
+      HOME: /app/backend/data
+      ENABLE_OLLAMA_API: "False"
+      ENABLE_OPENAI_API: "True"
+      OPENAI_API_BASE_URL: ${OMNIROUTE_BASE_URL}
+      OPENAI_API_KEY: ${OMNIROUTE_API_KEY}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      ENABLE_WEB_SEARCH: "True"
+      WEB_SEARCH_ENGINE: firecrawl
+      WEB_LOADER_ENGINE: firecrawl
+      FIRECRAWL_API_BASE_URL: http://firecrawl-api:3002
+      SEARXNG_QUERY_URL: http://searxng/search?q=<query>
+      WEB_SEARCH_RESULT_COUNT: 6
+      WEB_SEARCH_CONCURRENT_REQUESTS: 10
+      WEB_LOADER_CONCURRENT_REQUESTS: 10
+      # Work around Open WebUI 0.9.6 dropping web-search vector collections.
+      # Inject Firecrawl page content directly instead.
+      BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL: "True"
+      BYPASS_WEB_SEARCH_WEB_LOADER: "False"
+      USER_AGENT: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+      STATIC_DIR: /app/backend/data/static
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  firecrawl-redis:
+  firecrawl-rabbitmq:
+  firecrawl-postgres:

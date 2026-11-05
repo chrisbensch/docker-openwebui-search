@@ -1,0 +1,12 @@
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+
+# Open WebUI runtime data
+/data/
+
+# Local tooling and credentials
+/.agents/
+/.aws/
+/.codex/
